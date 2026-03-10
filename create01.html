@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title> Local NotebookLM (Wasm Embedded)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 3px; }
+        .typing-indicator span {
+            animation: blink 1.4s infinite both;
+            height: 6px; width: 6px; background: #64748b; border-radius: 50%; display: inline-block; margin: 0 1px;
+        }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink { 0% { opacity: 0.2; } 20% { opacity: 1; } 100% { opacity: 0.2; } }
+        
+        /* Wasmコードブロック風のデザイン */
+        .wasm-code { font-family: 'Courier New', Courier, monospace; word-break: break-all; }
+    </style>
+</head>
+<body class="bg-slate-50 h-screen flex overflow-hidden font-sans text-slate-800">
+
+    <!-- 左側：資料パネル -->
+    <div class="w-1/3 max-w-sm bg-white border-r border-slate-200 flex flex-col shadow-lg z-10">
+        <div class="p-4 border-b border-slate-200 bg-slate-100 flex justify-between items-center">
+            <h1 class="text-lg font-extrabold text-slate-800 flex items-center gap-2">
+                <i class="fa-brands fa-rust text-orange-600"></i> OneFile RAG
+            </h1>
+            <span class="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-1 rounded border border-indigo-200 font-bold">
+                Wasm Embedded
+            </span>
+        </div>
+
+        <div class="p-4 border-b border-slate-200">
+            <h2 class="text-xs font-bold text-slate-500 mb-2"><i class="fa-solid fa-database mr-1"></i> ローカル資料の追加</h2>
+            <textarea id="sourceInput" rows="4" class="w-full text-sm p-3 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 resize-none" placeholder="ここにAIに読み込ませたい文章を入力..."></textarea>
+            <button id="addSourceBtn" class="mt-2 w-full bg-slate-800 hover:bg-slate-700 text-white text-sm font-bold py-2 px-4 rounded transition duration-150 flex items-center justify-center gap-2">
+                <i class="fa-solid fa-plus"></i> 追加してベクトル化
+            </button>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-4 bg-slate-50">
+            <h2 class="text-xs font-bold text-slate-500 mb-3 flex justify-between items-center">
+                保存済みドキュメント <span id="sourceCount" class="bg-slate-200 text-slate-600 py-0.5 px-2 rounded-full text-[10px]">0</span>
+            </h2>
+            <div id="sourceList" class="space-y-3">
+                <div class="text-sm text-slate-400 text-center py-8" id="emptySourceMsg">
+                    資料がありません
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右側：チャット画面 -->
+    <div class="flex-1 flex flex-col bg-white">
+        <!-- 内部システム状態（デモ用表示） -->
+        <div class="bg-slate-900 text-green-400 p-2 text-[10px] font-mono flex items-center justify-between">
+            <span>> SYSTEM_STATUS: <span id="sysStatus">INITIALIZING...</span></span>
+            <span class="text-slate-500">Embedded Wasm Module Loaded: <span id="wasmStatus" class="text-red-400">FALSE</span></span>
+        </div>
+
+        <div id="chatBox" class="flex-1 overflow-y-auto p-6 space-y-6">
+            <div class="flex gap-4">
+                <div class="w-8 h-8 rounded bg-indigo-600 flex items-center justify-center flex-shrink-0 shadow">
+                    <i class="fa-solid fa-robot text-white text-xs"></i>
+                </div>
+                <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm max-w-[85%]">
+                    <p class="text-sm leading-relaxed text-slate-700">
+                        <strong>HTML1ファイル完結型・ローカルAI</strong>へようこそ。<br><br>
+                        このHTMLファイルのソースコードを見るとわかりますが、検索アルゴリズムの一部として、コンパイル済みのRust(Wasm)バイナリがBase64形式で直接HTMLに埋め込まれています。<br><br>
+                        資料を追加して、質問を投げてみてください。すべてブラウザのローカルメモリ内で完結します！
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div class="p-4 bg-slate-50 border-t border-slate-200">
+            <div class="max-w-4xl mx-auto relative">
+                <input type="text" id="chatInput" class="w-full bg-white border border-slate-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 rounded py-3 pl-4 pr-12 text-sm shadow-sm transition" placeholder="まずは上部の黒いボタンからAIエンジンを起動してください" disabled>
+                <button id="sendBtn" class="absolute right-2 top-1/2 transform -translate-y-1/2 w-8 h-8 bg-indigo-600 text-white rounded flex items-center justify-center hover:bg-indigo-700 transition disabled:opacity-50" disabled>
+                    <i class="fa-solid fa-paper-plane text-xs"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI起動用オーバーレイ -->
+    <div id="initOverlay" class="absolute inset-0 bg-white/90 backdrop-blur-sm z-50 flex flex-col items-center justify-center">
+        <i class="fa-brands fa-rust text-6xl text-orange-600 mb-4 animate-bounce"></i>
+        <h2 class="text-2xl font-bold text-slate-800 mb-2">ローカルAIの起動</h2>
+        <p class="text-sm text-slate-500 mb-6 text-center">
+            埋め込まれたRust(Wasm)のインスタンス化と、<br>軽量LLMモデルのローカルへの読み込みを行います。
+        </p>
+        <button id="bootBtn" class="bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-8 rounded shadow-lg transition transform hover:-translate-y-1">
+            <i class="fa-solid fa-power-off mr-2"></i> システムをブートする
+        </button>
+        <p id="bootStatus" class="mt-4 text-sm font-mono text-slate-600 h-4"></p>
+    </div>
+
+    <!-- アプリケーションロジック -->
+    <script type="module">
+        import { pipeline, cos_sim } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0/dist/transformers.min.js';
+
+        // =======================================================================
+        // 【核心部】コンパイル済み Rust (WebAssembly) の Base64 直接埋め込み
+        // =======================================================================
+        // ※Rustソースコード（イメージ）:
+        // #[no_mangle]
+        // pub extern "C" fn boost_score(base_score: f32, keyword_match: i32) -> f32 {
+        //     base_score + (keyword_match as f32 * 0.1)
+        // }
+        // 
+        // 実際のCandle AIモデル（数十MB）をここに貼るとHTMLが巨大になりすぎるため、
+        // 今回は上記のような「RAGのスコア計算用Rust Wasm（約40バイト）」をコンパイルして直書きしています。
+        // ご自身で巨大なWasmを作った場合は、この文字列を差し替えるだけで1ファイルアプリになります。
+        const RUST_WASM_BASE64 = "AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABags="; 
+        // ※上記はデモ用の極小有効Wasmバイナリ（加算関数）です。
+
+        // Base64をUint8Array（バイナリ）に変換する関数
+        function base64ToUint8Array(base64) {
+            const binaryString = window.atob(base64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes;
+        }
+
+        let wasmInstance = null;
+        let extractor = null;
+        let generator = null;
+        const documents = [];
+        let docCounter = 0;
+
+        // UI Elements
+        const bootBtn = document.getElementById('bootBtn');
+        const bootStatus = document.getElementById('bootStatus');
+        const initOverlay = document.getElementById('initOverlay');
+        const chatInput = document.getElementById('chatInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const addSourceBtn = document.getElementById('addSourceBtn');
+        const sourceInput = document.getElementById('sourceInput');
+        const sysStatus = document.getElementById('sysStatus');
+        const wasmStatus = document.getElementById('wasmStatus');
+
+        // システムブート処理
+        bootBtn.addEventListener('click', async () => {
+            bootBtn.style.display = 'none';
+            
+            try {
+                // 1. 埋め込みRust(Wasm)の起動
+                bootStatus.textContent = "[1/3] Embedded Wasm をインスタンス化中...";
+                const wasmBytes = base64ToUint8Array(RUST_WASM_BASE64);
+                const wasmModule = await WebAssembly.instantiate(wasmBytes, {});
+                wasmInstance = wasmModule.instance.exports;
+                
+                wasmStatus.textContent = "TRUE (ACTIVE)";
+                wasmStatus.className = "text-green-400 font-bold";
+                console.log("Rust Wasm Loaded! Exports:", wasmInstance);
+
+                // 2. 埋め込みモデル（ベクトル化用）のロード
+                bootStatus.textContent = "[2/3] ベクトル検索エンジンをメモリにロード中...";
+                extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+
+                // 3. LLMモデル（テキスト生成用）のロード
+                bootStatus.textContent = "[3/3] 軽量LLMをロード中 (初回のみダウンロード)...";
+                generator = await pipeline('text-generation', 'Xenova/TinyLlama-1.1B-Chat-v1.0', {
+                    quantized: true // Wasm上でサクサク動かすために量子化モデルを使用
+                });
+
+                bootStatus.textContent = "システムオールグリーン。起動完了。";
+                sysStatus.textContent = "ONLINE - LOCAL MODE";
+                
+                setTimeout(() => {
+                    initOverlay.classList.add('hidden');
+                    chatInput.disabled = false;
+                    sendBtn.disabled = false;
+                    chatInput.placeholder = "追加した資料について質問してください";
+                    chatInput.focus();
+                }, 1000);
+
+            } catch (e) {
+                console.error(e);
+                bootStatus.innerHTML = `<span class="text-red-500">起動エラー: ${e.message}</span>`;
+                bootBtn.style.display = 'block';
+            }
+        });
+
+        // 資料の追加（ベクトル化）
+        addSourceBtn.addEventListener('click', async () => {
+            const text = sourceInput.value.trim();
+            if (!text) return;
+
+            addSourceBtn.disabled = true;
+            addSourceBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 処理中...';
+
+            try {
+                // 文章をベクトル（数値の配列）に変換
+                const output = await extractor(text, { pooling: 'mean', normalize: true });
+                const embedding = Array.from(output.data);
+
+                docCounter++;
+                documents.push({ id: docCounter, text, embedding });
+                
+                // UI更新
+                document.getElementById('emptySourceMsg').style.display = 'none';
+                document.getElementById('sourceCount').textContent = documents.length;
+                
+                const el = document.createElement('div');
+                el.className = 'bg-white p-3 rounded border border-slate-200 text-sm shadow-sm border-l-4 border-l-orange-500';
+                el.innerHTML = `
+                    <div class="font-bold text-slate-700 text-[10px] mb-1">DOC_${docCounter}</div>
+                    <div class="text-slate-600 line-clamp-2 text-xs">${text}</div>
+                `;
+                document.getElementById('sourceList').prepend(el);
+                sourceInput.value = '';
+            } catch (e) {
+                alert("エラーが発生しました: " + e.message);
+            } finally {
+                addSourceBtn.disabled = false;
+                addSourceBtn.innerHTML = '<i class="fa-solid fa-plus"></i> 追加してベクトル化';
+            }
+        });
+
+        // 質問と推論処理
+        const sendMessage = async () => {
+            const query = chatInput.value.trim();
+            if (!query) return;
+
+            addMessageToChat('user', query);
+            chatInput.value = '';
+            chatInput.disabled = true;
+            sendBtn.disabled = true;
+
+            const loadingId = addLoadingIndicator();
+
+            try {
+                // 1. 質問のベクトル化
+                const queryOutput = await extractor(query, { pooling: 'mean', normalize: true });
+                const queryEmbedding = Array.from(queryOutput.data);
+
+                let bestText = "";
+                let bestScore = -1;
+
+                // 2. RAG検索（類似度計算）
+                for (const doc of documents) {
+                    let baseScore = cos_sim(queryEmbedding, doc.embedding);
+                    
+                    // HTMLに直接埋め込んだ Rust (Wasm) バイナリを使用
+                    // 
+                    if (wasmInstance && wasmInstance.add) {
+                        // 本来はここで Rust側の高度なスコアリング関数を呼び出し
+                        let wasmCalculated = wasmInstance.add(10, 5); // = 15
+                        baseScore += (wasmCalculated * 0.0001); // スコアに反映（デモ用）
+                    }
+
+                    if (baseScore > bestScore) {
+                        bestScore = baseScore;
+                        bestText = doc.text;
+                    }
+                }
+
+                // 3. プロンプト生成
+                const contextBlock = bestText ? `資料:\n${bestText}\n\n` : `資料は登録されていません。\n\n`;
+                const prompt = `<|system|>\nあなたは優秀なアシスタントです。提供された資料に基づいて回答してください。</s>\n<|user|>\n${contextBlock}質問: ${query}</s>\n<|assistant|>\n`;
+
+                // 4. ローカルLLMで推論
+                const result = await generator(prompt, {
+                    max_new_tokens: 150,
+                    temperature: 0.1,
+                });
+
+                let answer = result[0].generated_text.split('<|assistant|>\n').pop().trim();
+                
+                if (bestText) {
+                    answer = `<div class="mb-2 text-[10px] text-orange-600 bg-orange-50 p-2 rounded border border-orange-100 font-mono">
+                        <i class="fa-brands fa-rust"></i> Wasm Score: ${bestScore.toFixed(4)}
+                    </div>` + answer;
+                }
+
+                removeElement(loadingId);
+                addMessageToChat('ai', answer);
+
+            } catch (error) {
+                removeElement(loadingId);
+                addMessageToChat('ai', `<span class="text-red-500">エラー: ${error.message}</span>`);
+            } finally {
+                chatInput.disabled = false;
+                sendBtn.disabled = false;
+                chatInput.focus();
+            }
+        };
+
+        sendBtn.addEventListener('click', sendMessage);
+        chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
+
+        function addMessageToChat(role, text) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = role === 'user' ? 'flex gap-4 flex-row-reverse' : 'flex gap-4';
+            let iconHtml = role === 'ai' ? `<div class="w-8 h-8 rounded bg-indigo-600 flex items-center justify-center shadow"><i class="fa-solid fa-robot text-white text-xs"></i></div>` : '';
+            let bubbleClass = role === 'user' ? 'bg-slate-800 text-white p-4 rounded-lg shadow max-w-[85%]' : 'bg-white p-4 rounded-lg border border-slate-200 shadow-sm max-w-[85%] text-slate-800';
+
+            msgDiv.innerHTML = `${iconHtml}<div class="${bubbleClass}"><p class="text-sm leading-relaxed">${text.replace(/\n/g, '<br>')}</p></div>`;
+            document.getElementById('chatBox').appendChild(msgDiv);
+            document.getElementById('chatBox').scrollTop = document.getElementById('chatBox').scrollHeight;
+        }
+
+        function addLoadingIndicator() {
+            const id = 'loading-' + Date.now();
+            const msgDiv = document.createElement('div');
+            msgDiv.id = id;
+            msgDiv.className = 'flex gap-4';
+            msgDiv.innerHTML = `<div class="w-8 h-8 rounded bg-indigo-600 flex items-center justify-center shadow"><i class="fa-solid fa-robot text-white text-xs"></i></div>
+                <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm w-16 flex justify-center"><div class="typing-indicator flex items-center"><span></span><span></span><span></span></div></div>`;
+            document.getElementById('chatBox').appendChild(msgDiv);
+            document.getElementById('chatBox').scrollTop = document.getElementById('chatBox').scrollHeight;
+            return id;
+        }
+        function removeElement(id) { const el = document.getElementById(id); if (el) el.remove(); }
+    </script>
+</body>
+</html>
